@@ -1,67 +1,75 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { InjectModel } from '@nestjs/sequelize';
-import { Auth } from './auth.model';
-import { JwtService } from '@nestjs/jwt';
+import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import { JwtService } from '@nestjs/jwt';
+import { Auth } from './auth.entity';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { UserRole } from '../enums/role.enum';
 
 @Injectable()
 export class AuthService {
-  Auth: any;
   constructor(
-    @InjectModel(Auth) private authModel: typeof Auth,
-    private jwtService: JwtService,
+    @InjectRepository(Auth)
+    private readonly authRepository: Repository<Auth>, 
+    private readonly jwtService: JwtService,
   ) {}
 
+  
   async register(dto: RegisterDto) {
-    const hashedPassword = await bcrypt.hash(dto.password, 10);
-
-    await this.authModel.create({
+    const existing = await this.authRepository.findOne({ where: { email: dto.email } });
+    if (existing) throw new UnauthorizedException('Email already registered');
+    
+    const hash = await bcrypt.hash(dto.password, 10);
+    const user = this.authRepository.create({
+      username: dto.username,
       email: dto.email,
-      username: dto.username,
-      password: hashedPassword,
-    } as any);
-
-    return {
-      message: 'User registered successfully',
-      username: dto.username,
-    };
+      password: hash,
+      role: dto.role || UserRole.USER,
+    });
+    await this.authRepository.save(user);
+    
+    return { message: 'User registered successfully', user };
   }
-
+  
   async login(dto: LoginDto) {
-    const user = await this.authModel.findOne({
-      where: { email: dto.email },
-    });
-
-    if (!user) {
-      throw new UnauthorizedException('User not found');
-    }
-
+    const user = await this.authRepository.findOne({ where: { email: dto.email } });
+    if (!user) throw new UnauthorizedException('User not found');
+    
     const isMatch = await bcrypt.compare(dto.password, user.password);
-    if (!isMatch) {
-      throw new UnauthorizedException('Invalid password');
-    }
-
-    const token = this.jwtService.sign({
-      username: user.username,
-    });
-
-    return {
-      message: 'Login successful',
-      token,
-    };
+    if (!isMatch) throw new UnauthorizedException('Incorrect password');
+    
+    const payload = { email: user.email, role: user.role };
+    const token = await this.jwtService.signAsync(payload);
+    
+    return { access_token: token };
   }
 
-  async profile(token: string) {
-    try {
-      const data = this.jwtService.verify(token);
-      return await this.authModel.findOne({
-        where: { username: data.username },
-        attributes: ['username'],
-      });
-    } catch {
-      throw new UnauthorizedException('Invalid token');
-    }
-  }
+
+// CRUD 
+async findAll() {
+  return this.authRepository.find();
+}
+
+async findOne(id: number) {
+  const user = await this.authRepository.findOne({ where: { id } });
+  if (!user) throw new NotFoundException('User not found');
+  return user;
+}
+
+
+async update(id: number, dto: UpdateUserDto) {
+  if (dto.password) dto.password = await bcrypt.hash(dto.password, 10);
+  await this.authRepository.update(id, dto);
+  return this.findOne(id);
+}
+
+async remove(id: number) {
+  const user = await this.findOne(id);
+  return this.authRepository.remove(user);
+}
+// CRUD
 }
